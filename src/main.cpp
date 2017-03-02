@@ -8,7 +8,6 @@
 #include "sodium.h"
 
 #include "addrman.h"
-#include "alert.h"
 #include "arith_uint256.h"
 #include "chainparams.h"
 #include "checkpoints.h"
@@ -70,7 +69,6 @@ bool fCheckpointsEnabled = true;
 bool fCoinbaseEnforcedProtectionEnabled = true;
 size_t nCoinCacheUsage = 5000 * 300;
 uint64_t nPruneTarget = 0;
-bool fAlerts = DEFAULT_ALERTS;
 
 /** Fees smaller than this (in satoshi) are considered zero fee (for relaying and mining) */
 CFeeRate minRelayTxFee = CFeeRate(DEFAULT_MIN_RELAY_TX_FEE);
@@ -742,7 +740,7 @@ bool CheckFinalTx(const CTransaction &tx, int flags)
 /**
  * Check transaction inputs to mitigate two
  * potential denial-of-service attacks:
- * 
+ *
  * 1. scriptSigs with extra data stuffed into them,
  *    not consumed by scriptPubKey (or P2SH script)
  * 2. P2SH scripts with a crazy number of expensive
@@ -1488,6 +1486,26 @@ bool fLargeWorkForkFound = false;
 bool fLargeWorkInvalidChainFound = false;
 CBlockIndex *pindexBestForkTip = NULL, *pindexBestForkBase = NULL;
 
+static void AlertNotify(const std::string& strMessage, bool fThread)
+{
+    uiInterface.NotifyAlertChanged();
+    std::string strCmd = GetArg("-alertnotify", "");
+    if (strCmd.empty()) return;
+
+    // Alert text should be plain ascii coming from a trusted source, but to
+    // be safe we first strip anything not in safeChars, then add single quotes around
+    // the whole string before passing it to the shell:
+    std::string singleQuote("'");
+    std::string safeStatus = SanitizeString(strMessage);
+    safeStatus = singleQuote+safeStatus+singleQuote;
+    boost::replace_all(strCmd, "%s", safeStatus);
+
+    if (fThread)
+        boost::thread t(runCommand, strCmd); // thread runs free
+    else
+        runCommand(strCmd);
+}
+
 void CheckForkWarningConditions()
 {
     AssertLockHeld(cs_main);
@@ -1507,7 +1525,7 @@ void CheckForkWarningConditions()
         {
             std::string warning = std::string("'Warning: Large-work fork detected, forking after block ") +
                 pindexBestForkBase->phashBlock->ToString() + std::string("'");
-            CAlert::Notify(warning, true);
+            AlertNotify(warning, true);
         }
         if (pindexBestForkTip && pindexBestForkBase)
         {
@@ -1520,7 +1538,7 @@ void CheckForkWarningConditions()
         {
             std::string warning = std::string("Warning: Found invalid chain at least ~6 blocks longer than our best chain.\nChain state database corruption likely.");
             LogPrintf("%s: %s\n", warning.c_str(), __func__);
-            CAlert::Notify(warning, true);
+            AlertNotify(warning, true);
             fLargeWorkInvalidChainFound = true;
         }
     }
@@ -2168,7 +2186,7 @@ void PartitionCheck(bool (*initialDownloadCheck)(), CCriticalSection& cs, const 
     if (!strWarning.empty())
     {
         strMiscWarning = strWarning;
-        CAlert::Notify(strWarning, true);
+        AlertNotify(strWarning, true);
         lastAlertTime = now;
     }
 }
@@ -2637,7 +2655,7 @@ void static UpdateTip(CBlockIndex *pindexNew) {
         {
             // strMiscWarning is read by GetWarnings(), called by Qt and the JSON-RPC code to warn the user:
             strMiscWarning = _("Warning: This version is obsolete; upgrade required!");
-            CAlert::Notify(strMiscWarning, true);
+            AlertNotify(strMiscWarning, true);
             fWarned = true;
         }
     }
@@ -2702,7 +2720,7 @@ static int64_t nTimeFlush = 0;
 static int64_t nTimeChainState = 0;
 static int64_t nTimePostConnect = 0;
 
-/** 
+/**
  * Connect a new block to chainActive. pblock is either NULL or a pointer to a CBlock
  * corresponding to pindexNew, to bypass loading it again from disk.
  */
@@ -3359,28 +3377,6 @@ bool ContextualCheckBlock(const CBlock& block, CValidationState& state, CBlockIn
         if (block.vtx[0].vin[0].scriptSig.size() < expect.size() ||
             !std::equal(expect.begin(), expect.end(), block.vtx[0].vin[0].scriptSig.begin())) {
             return state.DoS(100, error("%s: block height mismatch in coinbase", __func__), REJECT_INVALID, "bad-cb-height");
-        }
-    }
-
-    // Coinbase transaction must include an output sending 20% of
-    // the block reward to a founders reward script, until the last founders
-    // reward block is reached, with exception of the genesis block.
-    // The last founders reward block is defined as the block just before the
-    // first subsidy halving block, which occurs at halving_interval + slow_start_shift
-    if ((nHeight > 0) && (nHeight <= consensusParams.GetLastFoundersRewardBlockHeight())) {
-        bool found = false;
-
-        BOOST_FOREACH(const CTxOut& output, block.vtx[0].vout) {
-            if (output.scriptPubKey == Params().GetFoundersRewardScriptAtHeight(nHeight)) {
-                if (output.nValue == (GetBlockSubsidy(nHeight, consensusParams) / 5)) {
-                    found = true;
-                    break;
-                }
-            }
-        }
-
-        if (!found) {
-            return state.DoS(100, error("%s: founders reward missing", __func__), REJECT_INVALID, "cb-no-founders-reward");
         }
     }
 
@@ -4336,14 +4332,8 @@ void static CheckBlockIndex()
     assert(nNodes == forward.size());
 }
 
-//////////////////////////////////////////////////////////////////////////////
-//
-// CAlert
-//
-
 string GetWarnings(string strFor)
 {
-    int nPriority = 0;
     string strStatusBar;
     string strRPC;
 
@@ -4356,36 +4346,16 @@ string GetWarnings(string strFor)
     // Misc warnings like out of disk space and clock is wrong
     if (strMiscWarning != "")
     {
-        nPriority = 1000;
         strStatusBar = strMiscWarning;
     }
 
     if (fLargeWorkForkFound)
     {
-        nPriority = 2000;
         strStatusBar = strRPC = _("Warning: The network does not appear to fully agree! Some miners appear to be experiencing issues.");
     }
     else if (fLargeWorkInvalidChainFound)
     {
-        nPriority = 2000;
         strStatusBar = strRPC = _("Warning: We do not appear to fully agree with our peers! You may need to upgrade, or other nodes may need to upgrade.");
-    }
-
-    // Alerts
-    {
-        LOCK(cs_mapAlerts);
-        BOOST_FOREACH(PAIRTYPE(const uint256, CAlert)& item, mapAlerts)
-        {
-            const CAlert& alert = item.second;
-            if (alert.AppliesToMe() && alert.nPriority > nPriority)
-            {
-                nPriority = alert.nPriority;
-                strStatusBar = alert.strStatusBar;
-                if (alert.nPriority >= ALERT_PRIORITY_SAFE_MODE) {
-                    strRPC = alert.strRPCError;
-                }
-            }
-        }
     }
 
     if (strFor == "statusbar")
@@ -4680,13 +4650,6 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
                 addrman.Add(addrFrom, addrFrom);
                 addrman.Good(addrFrom);
             }
-        }
-
-        // Relay alerts
-        {
-            LOCK(cs_mapAlerts);
-            BOOST_FOREACH(PAIRTYPE(const uint256, CAlert)& item, mapAlerts)
-                item.second.RelayTo(pfrom);
         }
 
         pfrom->fSuccessfullyConnected = true;
@@ -5296,38 +5259,6 @@ bool static ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv, 
             pfrom->nPingNonceSent = 0;
         }
     }
-
-
-    else if (fAlerts && strCommand == "alert")
-    {
-        CAlert alert;
-        vRecv >> alert;
-
-        uint256 alertHash = alert.GetHash();
-        if (pfrom->setKnown.count(alertHash) == 0)
-        {
-            if (alert.ProcessAlert(Params().AlertKey()))
-            {
-                // Relay
-                pfrom->setKnown.insert(alertHash);
-                {
-                    LOCK(cs_vNodes);
-                    BOOST_FOREACH(CNode* pnode, vNodes)
-                        alert.RelayTo(pnode);
-                }
-            }
-            else {
-                // Small DoS penalty so peers that send us lots of
-                // duplicate/expired/invalid-signature/whatever alerts
-                // eventually get banned.
-                // This isn't a Misbehaving(100) (immediate ban) because the
-                // peer might be an older or different implementation with
-                // a different signature key, etc.
-                Misbehaving(pfrom->GetId(), 10);
-            }
-        }
-    }
-
 
     else if (strCommand == "filterload")
     {
