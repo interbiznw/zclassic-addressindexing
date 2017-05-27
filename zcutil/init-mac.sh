@@ -38,7 +38,7 @@ function fetch_params {
                 "$url"
         fi
 
-        "$SHA256CMD" $SHA256ARGS -c <<EOF
+        "$SHA256CMD" $SHA256ARGS --check <<EOF
 $expectedhash  $dlname
 EOF
 
@@ -56,17 +56,25 @@ EOF
 # Use flock to prevent parallel execution.
 function lock() {
     local lockfile=/tmp/fetch_params.lock
-    # create lock file
-    eval "exec 200>/$lockfile"
-    # acquire the lock
-    gflock -n 200 \
-        && return 0 \
-        || return 1
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        if shlock -f ${lockfile} -p $$; then
+            return 0
+        else
+            return 1
+        fi
+    else
+        # create lock file
+        eval "exec 200>/$lockfile"
+        # acquire the lock
+        flock -n 200 \
+            && return 0 \
+            || return 1
+    fi
 }
 
 function exit_locked_error {
     echo "Only one instance of fetch-params.sh can be run at a time." >&2
-    #exit 1
+    exit 1
 }
 
 function main() {
@@ -110,10 +118,22 @@ EOF
 
     cd "$PARAMS_DIR"
 
-    fetch_params "$SPROUT_PKEY_URL" "$PARAMS_DIR/$SPROUT_PKEY_NAME" "8bc20a7f013b2b58970cddd2e7ea028975c88ae7ceb9259a5344a16bc2c0eef7"
-    fetch_params "$SPROUT_VKEY_URL" "$PARAMS_DIR/$SPROUT_VKEY_NAME" "4bd498dae0aacfd8e98dc306338d017d9c08dd0918ead18172bd0aec2fc5df82"
+    fetch_params "$SPROUT_PKEY_URL" "$PARAMS_DIR/$SPROUT_PKEY_NAME" "8bc20a7f013b2b58970cddd2e7ea028975c88ae7ceb9259a5344a16bc2$
+    fetch_params "$SPROUT_VKEY_URL" "$PARAMS_DIR/$SPROUT_VKEY_NAME" "4bd498dae0aacfd8e98dc306338d017d9c08dd0918ead18172bd0aec2f$
 }
 
 main
 rm -f /tmp/fetch_params.lock
+
+if [ ! -f "$HOME/Library/Application Support/Zclassic/zclassic.conf" ]; then
+    echo "Creating zclassic.conf"
+    mkdir -p "$HOME/Library/Application Support/Zclassic/"
+    echo "rpcuser=zcashrpc" > ~/Library/Application\ Support/Zclassic/zclassic.conf
+    PASSWORD=$(cat /dev/urandom | env LC_CTYPE=C tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1)
+    echo "rpcpassword=$PASSWORD" >> "$HOME/Library/Application Support/Zclassic/zclassic.conf"
+    echo "Complete!"
+fi
+
 exit 0
+
+
